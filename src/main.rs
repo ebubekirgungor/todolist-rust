@@ -1,15 +1,20 @@
-use std::{error::Error, io};
-use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
-use serde_json;
-use winreg::enums::*;
-use winreg::RegKey;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
+        MouseEvent, MouseEventKind,
+    },
     execute,
-    terminal::{disable_raw_mode, SetSize, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetSize,
+    },
 };
 use ratatui::{prelude::*, widgets::*};
+use serde::{Deserialize, Serialize};
+use serde_json;
+use std::path::Path;
+use std::{error::Error, io};
+use winreg::enums::*;
+use winreg::RegKey;
 enum InputMode {
     Normal,
     Editing,
@@ -23,30 +28,21 @@ struct Todo {
 }
 
 struct App {
-    /// Current value of the input box
     input: String,
-    /// Position of cursor in the editor area.
     cursor_position: usize,
-    /// Current input mode
     input_mode: InputMode,
-    /// History of recorded messages
-    messages: HashMap<usize, Todo>,
     count: usize,
+    todos: Vec<Todo>,
 }
-/*pub struct Todo {
-    id: i32,
-    text: String,
-    done: bool,
-}*/
 
 impl Default for App {
     fn default() -> App {
         App {
             input: String::new(),
             input_mode: InputMode::Normal,
-            messages: HashMap::new(),
             cursor_position: 0,
             count: 0,
+            todos: Vec::new(),
         }
     }
 }
@@ -71,20 +67,10 @@ impl App {
     fn delete_char(&mut self) {
         let is_not_cursor_leftmost = self.cursor_position != 0;
         if is_not_cursor_leftmost {
-            // Method "remove" is not used on the saved text for deleting the selected char.
-            // Reason: Using remove on String works on bytes instead of the chars.
-            // Using remove would require special care because of char boundaries.
-
             let current_index = self.cursor_position;
             let from_left_to_current_index = current_index - 1;
-
-            // Getting all characters before the selected character.
             let before_char_to_delete = self.input.chars().take(from_left_to_current_index);
-            // Getting all characters after selected character.
             let after_char_to_delete = self.input.chars().skip(current_index);
-
-            // Put all characters together except the selected one.
-            // By leaving the selected one out, it is forgotten and therefore deleted.
             self.input = before_char_to_delete.chain(after_char_to_delete).collect();
             self.move_cursor_left();
         }
@@ -98,52 +84,34 @@ impl App {
         self.cursor_position = 0;
     }
 
-    
-    
-    fn submit_message(&mut self) -> Result<(), Box<dyn std::error::Error>>  {
-        //let todo = get_todos();
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let todokey = hkcu.open_subkey("SOFTWARE\\todolist")?;
-        let todos: String = todokey.get_value("todos")?;
-        let todo: Vec<Todo> = serde_json::from_str(&todos)?;
-        for todo in todo.iter() {
-            let id: usize = todo.id;
-            let text: String = todo.text;
-            let done: bool = todo.done;
-            let todo = Todo {
-                id: id,
-                text: text,
-                done: done,
-            };
-            self.messages.insert(id, todo);
-        }
-
+    fn submit_message(&mut self) {
         let todo = Todo {
             id: self.count,
             text: String::from(self.input.clone()),
             done: false,
         };
-        self.messages.insert(self.count, todo);
+        self.todos.insert(self.count, todo);
         self.input.clear();
         self.reset_cursor();
-        self.count = self.count + 1;
-        Ok(())
+        self.count += 1;
     }
 }
 
 fn main() -> std::result::Result<(), Box<dyn Error>> {
-    
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, SetSize(60, 40))?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        SetSize(60, 40)
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // create app and run it
     let app = App::default();
     let res = run_app(&mut terminal, app);
 
-    // restore terminal
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -160,7 +128,17 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
 }
 
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let todokey = hkcu.open_subkey("SOFTWARE\\todolist")?;
+    let todos: String = todokey.get_value("todos")?;
+    let todo: Vec<Todo> = serde_json::from_str(&todos)?;
+    let path = Path::new("SOFTWARE").join("todolist");
+    let (key, disp) = hkcu.create_subkey(&path)?;
+    app.todos = todo;
+    app.count = app.todos.len();
     loop {
+        let json = serde_json::to_string(&app.todos)?;
+        key.set_value("todos", &json)?;
         terminal.draw(|f| ui(f, &app))?;
 
         if let Event::Key(key) = event::read()? {
@@ -195,6 +173,58 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                 },
                 _ => {}
             }
+        } else if let Event::Mouse(mouse_event) = event::read()? {
+            match mouse_event {
+                MouseEvent {
+                    kind,
+                    column,
+                    row,
+                    modifiers,
+                } => {
+                    if kind == MouseEventKind::Up(MouseButton::Left)
+                        || kind == MouseEventKind::Down(MouseButton::Left)
+                    {
+                        if column >= 1 && row == 3 || row == 2 || row == 1 {
+                            app.input_mode = InputMode::Editing;
+                        } else {
+                            app.input_mode = InputMode::Normal;
+                        }
+                        let mut i = 0;
+                        let mut rw = 0;
+                        while i < app.todos.len() {
+                            if i == 0 {
+                                if (column == 3 || column == 4) && row == i as u16 + 5 {
+                                    app.todos[i].done = !app.todos[i].done;
+                                } else if column == 56 && row == i as u16 + 5 {
+                                    app.todos.remove(i);
+                                    app.count -= 1;
+                                    let mut j = 0;
+                                    while j < app.todos.len() {
+                                        app.todos[j].id = j;
+                                        j += 1;
+                                    }
+                                }
+                            } else {
+                                if (column == 3 || column == 4) && row == 5 + rw {
+                                    app.todos[i].done = !app.todos[i].done;
+                                } else if column == 56 && row == 5 + rw {
+                                    app.todos.remove(i);
+                                    app.count -= 1;
+                                    let mut j = 0;
+                                    while j < app.todos.len() {
+                                        app.todos[j].id = j;
+                                        j += 1;
+                                    }
+                                }
+                            }
+                            i += 1;
+                            rw += 3;
+                        }
+                        let json = serde_json::to_string(&app.todos)?;
+                        key.set_value("todos", &json)?;
+                    }
+                }
+            }
         }
     }
 }
@@ -228,81 +258,50 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
         )
         .split(f.size());
 
-    /*let (msg, style) = match app.input_mode {
-        InputMode::Normal => (
-            vec![
-                "Press ".into(),
-                "q".bold(),
-                " to exit, ".into(),
-                "e".bold(),
-                " to start editing.".bold(),
-            ],
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        InputMode::Editing => (
-            vec![
-                "Press ".into(),
-                "Esc".bold(),
-                " to stop editing, ".into(),
-                "Enter".bold(),
-                " to record the message".into(),
-            ],
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-    };
-    let mut text = Text::from(Line::from(msg));
-    text.patch_style(style);
-    let help_message = Paragraph::new(text);
-    f.render_widget(help_message, chunks[0]);*/
-
     let input = Paragraph::new(app.input.as_str())
         .style(match app.input_mode {
             InputMode::Normal => Style::default(),
             InputMode::Editing => Style::default().fg(Color::Yellow),
         })
-        .block(Block::default().borders(Borders::ALL).title("Input").add_modifier(Modifier::BOLD).padding(Padding::new(1, 0, 0, 0)).title_alignment(Alignment::Center));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Add Todo ")
+                .add_modifier(Modifier::BOLD)
+                .padding(Padding::new(1, 0, 0, 0))
+                .title_alignment(Alignment::Center),
+        );
     f.render_widget(input, chunks[1]);
     match app.input_mode {
-        InputMode::Normal =>
-            // Hide the cursor. `Frame` does this by default, so we don't need to do anything here
-            {}
+        InputMode::Normal => {}
 
-        InputMode::Editing => {
-            // Make the cursor visible and ask ratatui to put it at the specified coordinates after
-            // rendering
-            f.set_cursor(
-                // Draw the cursor at the current position in the input field.
-                // This position is can be controlled via the left and right arrow key
-                chunks[1].x + app.cursor_position as u16 + 2,
-                // Move one line down, from the border to the input line
-                chunks[1].y + 1,
-            )
+        InputMode::Editing => f.set_cursor(
+            chunks[1].x + app.cursor_position as u16 + 2,
+            chunks[1].y + 1,
+        ),
+    }
+
+    for todo in app.todos.iter() {
+        let t: &Todo = todo;
+        let mut i = 0;
+        let mut space = String::new();
+        while i < 48 - t.text.len() {
+            space += " ";
+            i += 1;
         }
+        f.render_widget(
+            Paragraph::new(if t.done {
+                "[./] ".to_owned() + &t.text.to_string() + &space + "[x] "
+            } else {
+                "[  ] ".to_owned() + &t.text.to_string() + &space + "[x] "
+            })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .add_modifier(Modifier::BOLD)
+                    .padding(Padding::new(1, 0, 0, 0)),
+            ),
+            chunks[2 + t.id],
+        );
     }
-
-    //let todos_block = Block::default().borders(Borders::ALL).add_modifier(Modifier::BOLD);
-
-
-    /*app.messages.iter().map(|(i, t)| {
-        //let (i, m): (&usize, &String) = todo;
-        f.render_widget(Paragraph::new(t.text.to_string()).block(Block::default().borders(Borders::ALL).add_modifier(Modifier::BOLD)), chunks[2+i]);
-    }).collect();*/
-
-
-    for todo in app.messages.iter() {
-        let (i, t): (&usize, &Todo) = todo;
-        f.render_widget(Paragraph::new(if t.done { "[./] ".to_owned() + &t.text.to_string()} else {"[  ] ".to_owned() + &t.text.to_string()} ).block(Block::default().borders(Borders::ALL).add_modifier(Modifier::BOLD).padding(Padding::new(1, 0, 0, 0))), chunks[2+i]);
-    }
-
-    /*let messages: Vec<ListItem> = app
-        .messages
-        .iter()
-        .map(|(i, m)| {
-            let content = Line::from(Span::raw(format!("{i}: {m}")));
-            ListItem::new(content)
-        })
-        .collect();
-    let messages =
-        List::new(messages).block(Block::default().borders(Borders::ALL).add_modifier(Modifier::BOLD));
-    f.render_widget(messages, chunks[2]);*/
 }
