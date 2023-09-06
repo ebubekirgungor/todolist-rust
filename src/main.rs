@@ -6,6 +6,7 @@ use crossterm::{
     execute,
     terminal::{
         disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetSize,
+        SetTitle,
     },
 };
 use ratatui::{prelude::*, widgets::*};
@@ -113,7 +114,8 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
         stdout,
         EnterAlternateScreen,
         EnableMouseCapture,
-        SetSize(60, 40)
+        SetSize(60, 40),
+        SetTitle("Todolist")
     )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
