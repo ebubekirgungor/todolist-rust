@@ -29,7 +29,6 @@ struct Todo {
 }
 
 struct Editing {
-    id: usize,
     edit: bool,
 }
 
@@ -98,10 +97,7 @@ impl App {
             text: String::from(self.input.clone()),
             done: false,
         };
-        let edit = Editing {
-            id: self.count,
-            edit: false,
-        };
+        let edit = Editing { edit: false };
         self.editing.push(edit);
         self.todos.insert(self.count, todo);
         self.input.clear();
@@ -142,21 +138,26 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
 
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let todokey = hkcu.open_subkey("SOFTWARE\\todolist")?;
-    let todos: String = todokey.get_value("todos")?;
-    let todo: Vec<Todo> = serde_json::from_str(&todos)?;
     let path = Path::new("SOFTWARE").join("todolist");
-    let (key, disp) = hkcu.create_subkey(&path)?;
+    let (key, _disp) = hkcu.create_subkey_with_flags(&path, KEY_ALL_ACCESS)?;
+    let todos: String;
+
+    match key.get_value::<String, _>("todos") {
+        Ok(_) => todos = key.get_value("todos")?,
+        Err(_) => {
+            key.set_value("todos", &"[]")?;
+            todos = key.get_value("todos")?
+        }
+    }
+
+    let todo: Vec<Todo> = serde_json::from_str(&todos)?;
     app.todos = todo;
     app.count = app.todos.len();
     let mut i = 0;
     while i < app.count {
-        let edit = Editing {
-            id: app.todos[i].id,
-            edit: false,
-        };
+        let edit = Editing { edit: false };
         app.editing.push(edit);
-        i+=1;
+        i += 1;
     }
     loop {
         let json = serde_json::to_string(&app.todos)?;
@@ -188,18 +189,34 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                     _ => {}
                 },
                 InputMode::Updating if key.kind == KeyEventKind::Press => match key.code {
-                    KeyCode::Enter => app.submit_message(),
+                    KeyCode::Enter => {
+                        app.input_mode = InputMode::Normal;
+                        let mut i = 0;
+                        while i < app.todos.len() {
+                            if app.editing[i].edit {
+                                app.editing[i].edit = false;
+                            }
+                            i += 1;
+                        }
+                    }
                     KeyCode::Char(to_insert) => {
-                        app.enter_char(to_insert);
+                        let mut i = 0;
+                        while i < app.todos.len() {
+                            if app.editing[i].edit {
+                                let len = app.todos[i].text.len();
+                                app.todos[i].text.insert((len) as usize, to_insert);
+                            }
+                            i += 1;
+                        }
                     }
                     KeyCode::Backspace => {
-                        app.delete_char();
-                    }
-                    KeyCode::Left => {
-                        app.move_cursor_left();
-                    }
-                    KeyCode::Right => {
-                        app.move_cursor_right();
+                        let mut i = 0;
+                        while i < app.todos.len() {
+                            if app.editing[i].edit {
+                                app.todos[i].text.pop();
+                            }
+                            i += 1;
+                        }
                     }
                     _ => {}
                 },
@@ -211,7 +228,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                     kind,
                     column,
                     row,
-                    modifiers,
+                    modifiers: _,
                 } => {
                     if kind == MouseEventKind::Up(MouseButton::Left)
                         || kind == MouseEventKind::Down(MouseButton::Left)
@@ -272,32 +289,16 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
 }
 
 fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
+    let mut constraints = Vec::new();
+    constraints.push(Constraint::Length(1));
+    for _ in 0..17 {
+        constraints.push(Constraint::Length(3));
+    }
+    constraints.push(Constraint::Min(1));
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(
-            [
-                Constraint::Length(1),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Min(1),
-            ]
-            .as_ref(),
-        )
+        .constraints(constraints.as_slice().as_ref())
         .split(f.size());
 
     let input = Paragraph::new(app.input.as_str())
@@ -317,13 +318,13 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
     f.render_widget(input, chunks[1]);
     match app.input_mode {
         InputMode::Normal => {}
-        InputMode::Updating => {},
+        InputMode::Updating => {}
         InputMode::Editing => f.set_cursor(
             chunks[1].x + app.cursor_position as u16 + 2,
             chunks[1].y + 1,
         ),
     }
-    
+
     for todo in app.todos.iter() {
         let t: &Todo = todo;
         let mut i = 0;
@@ -332,7 +333,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
             space += " ";
             i += 1;
         }
-        
+
         f.render_widget(
             Paragraph::new(if t.done {
                 "[./] ".to_owned() + &t.text.to_string() + &space + "[x] "
@@ -355,10 +356,9 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
 
         if app.editing[t.id].edit {
             f.set_cursor(
-                chunks[2+t.id].x + t.text.len() as u16 + 7,
-                chunks[2+t.id].y + 1,
+                chunks[2 + t.id].x + t.text.len() as u16 + 7,
+                chunks[2 + t.id].y + 1,
             );
         }
-
     }
 }
