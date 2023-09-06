@@ -18,6 +18,7 @@ use winreg::RegKey;
 enum InputMode {
     Normal,
     Editing,
+    Updating,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -27,12 +28,18 @@ struct Todo {
     done: bool,
 }
 
+struct Editing {
+    id: usize,
+    edit: bool,
+}
+
 struct App {
     input: String,
     cursor_position: usize,
     input_mode: InputMode,
     count: usize,
     todos: Vec<Todo>,
+    editing: Vec<Editing>,
 }
 
 impl Default for App {
@@ -43,6 +50,7 @@ impl Default for App {
             cursor_position: 0,
             count: 0,
             todos: Vec::new(),
+            editing: Vec::new(),
         }
     }
 }
@@ -90,6 +98,11 @@ impl App {
             text: String::from(self.input.clone()),
             done: false,
         };
+        let edit = Editing {
+            id: self.count,
+            edit: false,
+        };
+        self.editing.push(edit);
         self.todos.insert(self.count, todo);
         self.input.clear();
         self.reset_cursor();
@@ -136,6 +149,15 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
     let (key, disp) = hkcu.create_subkey(&path)?;
     app.todos = todo;
     app.count = app.todos.len();
+    let mut i = 0;
+    while i < app.count {
+        let edit = Editing {
+            id: app.todos[i].id,
+            edit: false,
+        };
+        app.editing.push(edit);
+        i+=1;
+    }
     loop {
         let json = serde_json::to_string(&app.todos)?;
         key.set_value("todos", &json)?;
@@ -144,10 +166,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
         if let Event::Key(key) = event::read()? {
             match app.input_mode {
                 InputMode::Normal => match key.code {
-                    KeyCode::Char('e') => {
-                        app.input_mode = InputMode::Editing;
-                    }
-                    KeyCode::Char('q') => {
+                    KeyCode::Esc => {
                         return Ok(());
                     }
                     _ => {}
@@ -166,8 +185,21 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                     KeyCode::Right => {
                         app.move_cursor_right();
                     }
-                    KeyCode::Esc => {
-                        app.input_mode = InputMode::Normal;
+                    _ => {}
+                },
+                InputMode::Updating if key.kind == KeyEventKind::Press => match key.code {
+                    KeyCode::Enter => app.submit_message(),
+                    KeyCode::Char(to_insert) => {
+                        app.enter_char(to_insert);
+                    }
+                    KeyCode::Backspace => {
+                        app.delete_char();
+                    }
+                    KeyCode::Left => {
+                        app.move_cursor_left();
+                    }
+                    KeyCode::Right => {
+                        app.move_cursor_right();
                     }
                     _ => {}
                 },
@@ -203,6 +235,11 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                                         app.todos[j].id = j;
                                         j += 1;
                                     }
+                                } else if column > 5 && column < 56 && row == i as u16 + 5 {
+                                    app.editing[i].edit = true;
+                                    app.input_mode = InputMode::Updating;
+                                } else {
+                                    app.editing[i].edit = false;
                                 }
                             } else {
                                 if (column == 3 || column == 4) && row == 5 + rw {
@@ -215,6 +252,11 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                                         app.todos[j].id = j;
                                         j += 1;
                                     }
+                                } else if column > 5 && column < 56 && row == 5 + rw {
+                                    app.editing[i].edit = true;
+                                    app.input_mode = InputMode::Updating;
+                                } else {
+                                    app.editing[i].edit = false;
                                 }
                             }
                             i += 1;
@@ -261,6 +303,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
     let input = Paragraph::new(app.input.as_str())
         .style(match app.input_mode {
             InputMode::Normal => Style::default(),
+            InputMode::Updating => Style::default(),
             InputMode::Editing => Style::default().fg(Color::Yellow),
         })
         .block(
@@ -274,13 +317,13 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
     f.render_widget(input, chunks[1]);
     match app.input_mode {
         InputMode::Normal => {}
-
+        InputMode::Updating => {},
         InputMode::Editing => f.set_cursor(
             chunks[1].x + app.cursor_position as u16 + 2,
             chunks[1].y + 1,
         ),
     }
-
+    
     for todo in app.todos.iter() {
         let t: &Todo = todo;
         let mut i = 0;
@@ -289,11 +332,17 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
             space += " ";
             i += 1;
         }
+        
         f.render_widget(
             Paragraph::new(if t.done {
                 "[./] ".to_owned() + &t.text.to_string() + &space + "[x] "
             } else {
                 "[  ] ".to_owned() + &t.text.to_string() + &space + "[x] "
+            })
+            .style(if app.editing[t.id].edit {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
             })
             .block(
                 Block::default()
@@ -303,5 +352,13 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
             ),
             chunks[2 + t.id],
         );
+
+        if app.editing[t.id].edit {
+            f.set_cursor(
+                chunks[2+t.id].x + t.text.len() as u16 + 7,
+                chunks[2+t.id].y + 1,
+            );
+        }
+
     }
 }
