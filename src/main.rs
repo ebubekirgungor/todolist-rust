@@ -8,6 +8,7 @@ use crossterm::{
         disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetSize,
         SetTitle,
     },
+    ExecutableCommand,
 };
 use ratatui::{prelude::*, widgets::*};
 use serde::{Deserialize, Serialize};
@@ -139,6 +140,9 @@ fn main() -> std::result::Result<(), Box<dyn Error>> {
 }
 
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
+    let mut stdout = io::stdout();
+    let initial_size = crossterm::terminal::size()?;
+    let restore_size = crossterm::terminal::SetSize(initial_size.0, initial_size.1);
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let path = Path::new("SOFTWARE").join("todolist");
     let (key, _disp) = hkcu.create_subkey_with_flags(&path, KEY_ALL_ACCESS)?;
@@ -162,130 +166,136 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
         i += 1;
     }
     loop {
-        let json = serde_json::to_string(&app.todos)?;
-        key.set_value("todos", &json)?;
-        terminal.draw(|f| ui(f, &app))?;
+        if event::poll(std::time::Duration::from_millis(500))? {
+            let json = serde_json::to_string(&app.todos)?;
+            key.set_value("todos", &json)?;
+            terminal.draw(|f| ui(f, &app))?;
 
-        if let Event::Key(key) = event::read()? {
-            match app.input_mode {
-                InputMode::Normal => match key.code {
-                    KeyCode::Esc => {
-                        return Ok(());
-                    }
-                    _ => {}
-                },
-                InputMode::Editing if key.kind == KeyEventKind::Press => match key.code {
-                    KeyCode::Enter => app.submit_message(),
-                    KeyCode::Char(to_insert) => {
-                        app.enter_char(to_insert);
-                    }
-                    KeyCode::Backspace => {
-                        app.delete_char();
-                    }
-                    KeyCode::Left => {
-                        app.move_cursor_left();
-                    }
-                    KeyCode::Right => {
-                        app.move_cursor_right();
-                    }
-                    _ => {}
-                },
-                InputMode::Updating if key.kind == KeyEventKind::Press => match key.code {
-                    KeyCode::Enter => {
-                        app.input_mode = InputMode::Normal;
-                        let mut i = 0;
-                        while i < app.todos.len() {
-                            if app.editing[i].edit {
-                                app.editing[i].edit = false;
-                            }
-                            i += 1;
+            if let Event::Key(key) = event::read()? {
+                match app.input_mode {
+                    InputMode::Normal => match key.code {
+                        KeyCode::Esc => {
+                            return Ok(());
                         }
-                    }
-                    KeyCode::Char(to_insert) => {
-                        let mut i = 0;
-                        while i < app.todos.len() {
-                            if app.editing[i].edit {
-                                let len = app.todos[i].text.len();
-                                app.todos[i].text.insert((len) as usize, to_insert);
-                            }
-                            i += 1;
+                        _ => {}
+                    },
+                    InputMode::Editing if key.kind == KeyEventKind::Press => match key.code {
+                        KeyCode::Enter => app.submit_message(),
+                        KeyCode::Char(to_insert) => {
+                            app.enter_char(to_insert);
                         }
-                    }
-                    KeyCode::Backspace => {
-                        let mut i = 0;
-                        while i < app.todos.len() {
-                            if app.editing[i].edit {
-                                app.todos[i].text.pop();
-                            }
-                            i += 1;
+                        KeyCode::Backspace => {
+                            app.delete_char();
                         }
-                    }
-                    _ => {}
-                },
-                _ => {}
-            }
-        } else if let Event::Mouse(mouse_event) = event::read()? {
-            match mouse_event {
-                MouseEvent {
-                    kind,
-                    column,
-                    row,
-                    modifiers: _,
-                } => {
-                    if kind == MouseEventKind::Up(MouseButton::Left)
-                        || kind == MouseEventKind::Down(MouseButton::Left)
-                    {
-                        if column >= 1 && row == 3 || row == 2 || row == 1 {
-                            app.input_mode = InputMode::Editing;
-                        } else {
+                        KeyCode::Left => {
+                            app.move_cursor_left();
+                        }
+                        KeyCode::Right => {
+                            app.move_cursor_right();
+                        }
+                        _ => {}
+                    },
+                    InputMode::Updating if key.kind == KeyEventKind::Press => match key.code {
+                        KeyCode::Enter => {
                             app.input_mode = InputMode::Normal;
-                        }
-                        let mut i = 0;
-                        let mut rw = 0;
-                        while i < app.todos.len() {
-                            if i == 0 {
-                                if (column == 3 || column == 4) && row == i as u16 + 5 {
-                                    app.todos[i].done = !app.todos[i].done;
-                                } else if column == 56 && row == i as u16 + 5 {
-                                    app.todos.remove(i);
-                                    app.count -= 1;
-                                    let mut j = 0;
-                                    while j < app.todos.len() {
-                                        app.todos[j].id = j;
-                                        j += 1;
-                                    }
-                                } else if column > 5 && column < 56 && row == i as u16 + 5 {
-                                    app.editing[i].edit = true;
-                                    app.input_mode = InputMode::Updating;
-                                } else {
+                            let mut i = 0;
+                            while i < app.todos.len() {
+                                if app.editing[i].edit {
                                     app.editing[i].edit = false;
                                 }
-                            } else {
-                                if (column == 3 || column == 4) && row == 5 + rw {
-                                    app.todos[i].done = !app.todos[i].done;
-                                } else if column == 56 && row == 5 + rw {
-                                    app.todos.remove(i);
-                                    app.count -= 1;
-                                    let mut j = 0;
-                                    while j < app.todos.len() {
-                                        app.todos[j].id = j;
-                                        j += 1;
-                                    }
-                                } else if column > 5 && column < 56 && row == 5 + rw {
-                                    app.editing[i].edit = true;
-                                    app.input_mode = InputMode::Updating;
-                                } else {
-                                    app.editing[i].edit = false;
-                                }
+                                i += 1;
                             }
-                            i += 1;
-                            rw += 3;
                         }
-                        let json = serde_json::to_string(&app.todos)?;
-                        key.set_value("todos", &json)?;
+                        KeyCode::Char(to_insert) => {
+                            let mut i = 0;
+                            while i < app.todos.len() {
+                                if app.editing[i].edit {
+                                    let len = app.todos[i].text.len();
+                                    app.todos[i].text.insert((len) as usize, to_insert);
+                                }
+                                i += 1;
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            let mut i = 0;
+                            while i < app.todos.len() {
+                                if app.editing[i].edit {
+                                    app.todos[i].text.pop();
+                                }
+                                i += 1;
+                            }
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            } else if let Event::Mouse(mouse_event) = event::read()? {
+                match mouse_event {
+                    MouseEvent {
+                        kind,
+                        column,
+                        row,
+                        modifiers: _,
+                    } => {
+                        if kind == MouseEventKind::Up(MouseButton::Left)
+                            || kind == MouseEventKind::Down(MouseButton::Left)
+                        {
+                            if column >= 1 && row == 3 || row == 2 || row == 1 {
+                                app.input_mode = InputMode::Editing;
+                            } else {
+                                app.input_mode = InputMode::Normal;
+                            }
+                            let mut i = 0;
+                            let mut rw = 0;
+                            while i < app.todos.len() {
+                                if i == 0 {
+                                    if (column == 3 || column == 4) && row == i as u16 + 5 {
+                                        app.todos[i].done = !app.todos[i].done;
+                                    } else if column == 56 && row == i as u16 + 5 {
+                                        app.todos.remove(i);
+                                        app.count -= 1;
+                                        let mut j = 0;
+                                        while j < app.todos.len() {
+                                            app.todos[j].id = j;
+                                            j += 1;
+                                        }
+                                    } else if column > 5 && column < 56 && row == i as u16 + 5 {
+                                        app.editing[i].edit = true;
+                                        app.input_mode = InputMode::Updating;
+                                    } else {
+                                        app.editing[i].edit = false;
+                                    }
+                                } else {
+                                    if (column == 3 || column == 4) && row == 5 + rw {
+                                        app.todos[i].done = !app.todos[i].done;
+                                    } else if column == 56 && row == 5 + rw {
+                                        app.todos.remove(i);
+                                        app.count -= 1;
+                                        let mut j = 0;
+                                        while j < app.todos.len() {
+                                            app.todos[j].id = j;
+                                            j += 1;
+                                        }
+                                    } else if column > 5 && column < 56 && row == 5 + rw {
+                                        app.editing[i].edit = true;
+                                        app.input_mode = InputMode::Updating;
+                                    } else {
+                                        app.editing[i].edit = false;
+                                    }
+                                }
+                                i += 1;
+                                rw += 3;
+                            }
+                            let json = serde_json::to_string(&app.todos)?;
+                            key.set_value("todos", &json)?;
+                        }
                     }
                 }
             }
+        }
+        let updated_size = crossterm::terminal::size()?;
+        if updated_size.0 != initial_size.0 {
+            stdout.execute(restore_size.clone())?;
         }
     }
 }
